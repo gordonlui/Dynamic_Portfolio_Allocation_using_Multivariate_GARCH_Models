@@ -1,0 +1,352 @@
+---
+title: "Dynamic Portfolio Allocation"
+date: "2025-04-28"
+output: pdf_document
+---
+
+```{r}
+#Loading packages
+library(xts)
+library(MASS)
+library(quadprog)
+library(DistributionUtils)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+```{r Data Preparation}
+#Load index data
+index_return <- read.csv("Log return Stock Index Data (USD).csv", header = TRUE) 
+index_return$Name <- as.Date(index_return$Name, format = "%d/%m/%Y") 
+index_return <- as.xts(index_return) 
+
+#Split into training and test data
+index_return_train_and_test <- index_return[c(2610:6586),] #Jan 2010 (3977 data) 
+index_return_train <- index_return[c(2610:5479),] #Jan 2010 - Dec 2020 (2870 data) 
+index_return_test <- index_return[c(5480:6586),] #Jan 2021 - Mar 2025 (1107 data) 
+```
+
+```{r Import data for yields}
+#Probably don't need this anymore
+us_yield <- read.csv("Log daily risk-free rate.csv",header=TRUE)
+us_yield$Name <- as.Date(us_yield$Name, format = "%d/%m/%Y")
+us_yield <- as.xts(us_yield)
+
+yield_train_and_test <- us_yield[c(2610:6586)]
+yield_train <- us_yield[c(2610:5479)]
+yield_test <- us_yield[c(5480:6586)]
+```
+
+```{r Mean-Var portfolio for all models}
+#Import garch models
+vol_models <- list(model1_fcov_10,model2_fcov_10,model3_fcov_10,model4_fcov_10,model5_fcov_10,
+                model6_fcov_10,model7_fcov_10,model8_fcov_10,model9_fcov_10,model10_fcov_10)
+#Import return models
+return_models <- list(model1_fret_10, model2_fret_10, model3_fret_10, model4_fret_10, model5_fret_10, 
+                      model6_fret_10, model7_fret_10, model8_fret_10, model9_fret_10, model10_fret_10)
+for (j in 1:10) {
+  for (i in 1:1107){
+    return_models[[j]][[i]] <- as.matrix(return_models[[j]][[i]])
+  }
+}
+
+#Set initial investment
+init <- 100
+
+#Initialise
+portfolio_returns <- vector("list",length(vol_models))
+exp_portfolio_returns <- vector("list",length(vol_models))
+dollar_returns <- vector("list",length(vol_models))
+portfolio_weights <- vector("list",length(vol_models))
+c <- 0
+
+#Set up
+for (m in 1:length(vol_models)) {
+  port_returns <- c()
+  exp_port_returns <- c()
+  weights <- list()
+  for (i in 1:1107) {
+    returns_window <- index_return_train_and_test[1:(2870+i-1)]
+      
+    cov <- drop(vol_models[[m]][i][[1]])
+    S_adj <- cov + diag(1e-6, 37) #added an epislon term to ensure positive eigenvalues
+    R <- return_models[[m]][[i]]
+    adj_R <- R - c
+      
+    Dmat <- 2 * S_adj
+    dvec <- adj_R
+    Amat <- cbind(rep(1, length(adj_R)), diag(length(adj_R)))  # sum(x) = 1, x >= 0
+    bvec <- c(1, rep(0, length(adj_R)))  # Full investment + No short
+      
+    sol <- solve.QP(Dmat,dvec,Amat,bvec,meq=1)
+    x <- sol$solution
+    weights[[i]] <- x
+      
+    test_period <- index_return_test[i]
+    port_ret <- rowSums(test_period * matrix(weights[[i]],nrow=nrow(test_period),
+                          ncol=length(weights[[i]]),byrow=TRUE))
+    port_returns[i] <- port_ret
+    exp_port_returns[i] <- exp(port_ret / 100) - 1
+  }
+  port_ret_xts <- xts(port_returns,order.by=index(index_return_test))
+  exp_port_ret_xts <- xts(exp_port_returns,order.by=index(index_return_test))
+  dollar_ret_xts <- init * cumprod(1 + exp_port_ret_xts)
+    
+  portfolio_returns[[m]] <- port_ret_xts
+  exp_portfolio_returns[[m]] <- exp_port_ret_xts
+  dollar_returns[[m]] <- dollar_ret_xts
+  portfolio_weights[[m]] <- weights
+}
+```
+
+```{r Mean-Var portfolio for PCA models}
+pca_models <- list(pca_3pc,pca_4pc,pca_5pc,pca_6pc,pca_7pc,pca_8pc,pca_9pc)
+pca_return_models <- list(pca_3pc_ret, pca_4pc_ret, pca_5pc_ret, pca_6pc_ret, 
+                          pca_7pc_ret, pca_8pc_ret, pca_9pc_ret)
+for (j in 1:7) {
+  for (i in 1:1107){
+    pca_return_models[[j]][[i]] <- as.matrix(pca_return_models[[j]][[i]])
+  }
+}
+
+
+#Set initial investment
+init <- 100
+
+#Initialise
+portfolio_returns <- vector("list",length(pca_models))
+exp_portfolio_returns <- vector("list",length(pca_models))
+dollar_returns <- vector("list",length(pca_models))
+portfolio_weights <- vector("list",length(pca_models))
+c <- 0
+
+#Set up
+for (m in 1:length(pca_models)) {
+  port_returns <- c()
+  exp_port_returns <- c()
+  weights <- list()
+  for (i in 1:1107) {
+    returns_window <- index_return_train_and_test[1:(2870+i-1)]
+      
+    cov <- drop(pca_models[[m]][i][[1]])
+    S_adj <- cov + diag(1e-6, 37) #added an epislon term to ensure positive eigenvalues
+    R <- pca_return_models[[m]][[i]]
+    adj_R <- R - c
+      
+    Dmat <- 2 * S_adj
+    dvec <- adj_R
+    Amat <- cbind(rep(1, length(adj_R)), diag(length(adj_R)))  # sum(x) = 1, x >= 0
+    bvec <- c(1, rep(0, length(adj_R)))  # Full investment + No short
+      
+    sol <- solve.QP(Dmat,dvec,Amat,bvec,meq=1)
+    x <- sol$solution
+    weights[[i]] <- x
+      
+    test_period <- index_return_test[i]
+    port_ret <- rowSums(test_period * matrix(weights[[i]],nrow=nrow(test_period),
+                          ncol=length(weights[[i]]),byrow=TRUE))
+    port_returns[i] <- port_ret
+    exp_port_returns[i] <- exp(port_ret / 100) - 1
+  }
+  port_ret_xts <- xts(port_returns,order.by=index(index_return_test))
+  exp_port_ret_xts <- xts(exp_port_returns,order.by=index(index_return_test))
+  dollar_ret_xts <- init * cumprod(1 + exp_port_ret_xts)
+    
+  portfolio_returns[[m]] <- port_ret_xts
+  exp_portfolio_returns[[m]] <- exp_port_ret_xts
+  dollar_returns[[m]] <- dollar_ret_xts
+  portfolio_weights[[m]] <- weights
+}
+
+```
+
+```{r Weight plots by country}
+#This plots the weights chosen by different models for selected countries
+weights_index <- c(1,8,10,28,36) #Need to input the index for the desired country manually
+sig_weights <- vector("list",length(weights_index))
+country_names <- c("US","Japan","China","UAE","Iceland")
+names(sig_weights) <- country_names
+for (w in 1:length(sig_weights)){
+  country_w_weights <- vector("list",length(pca_models)) #Remember to change the length to pca/vol. i.e. 7 or 10
+  index <- weights_index[w]
+  for (i in 1:length(portfolio_weights)){
+  weight <- c()
+    for (j in 1:1107){
+      weight[j] <- portfolio_weights[[i]][[j]][index]
+    }
+    country_w_weights[[i]] <- weight
+  }
+  sig_weights[[w]] <- country_w_weights
+}
+
+plot_weights <- function(country, name) {
+  df <- as.data.frame(country)
+  colnames(df) <- paste("Model", 1:ncol(df))  # Rename columns to "Model 1", "Model 2", etc.
+  df$Day <- 1:nrow(df)
+  
+  df_long <- pivot_longer(df, -Day, names_to = "Model", values_to = "Weight")
+
+  ggplot(df_long, aes(x = Day, y = Weight, color = Model)) +
+    geom_line() +
+    labs(title = paste("Weights for", name), x = "Day", y = "Weight") +
+    theme_minimal()
+}
+
+# Example usage
+plot_weights(sig_weights$US, "US")
+plot_weights(sig_weights$Japan, "Japan")
+plot_weights(sig_weights$China,"China")
+plot_weights(sig_weights$UAE,"UAE")
+plot_weights(sig_weights$Iceland,"Iceland")
+```
+
+```{r Weight plots by models}
+#This plots the weights chosen by different models for selected countries
+#Choose your desired country by changing the weights_index and country_names 
+weights_index <- c(1,8,10,28,36)
+country_weights <- vector("list",length(weights_index))
+sig_weights <- vector("list",length(portfolio_weights))
+country_names <- c("US","Japan","China","UAE","Iceland")
+names(country_weights) <- country_names
+for (i in 1:length(portfolio_weights)){
+  for (w in 1:length(country_weights)){
+    index <- weights_index[w]
+    weight <- c()
+      for (j in 1:1107){
+        weight[j] <- portfolio_weights[[i]][[j]][index]
+      }
+    country_weights[[w]] <- weight
+  }
+  sig_weights[[i]] <- country_weights
+}
+
+# Plot weights for all countries for a single model
+plot_model_weights <- function(model_list, model_index) {
+  df <- as.data.frame(model_list)
+  df$Day <- 1:nrow(df)
+  
+  df_long <- pivot_longer(df, -Day, names_to = "Country", values_to = "Weight")
+  
+  ggplot(df_long, aes(x = Day, y = Weight, color = Country)) +
+    geom_line() +
+    labs(title = paste("Model", model_index, "- Country Weights Over Time"),
+         x = "Day", y = "Weight") +
+    theme_minimal()
+}
+
+#Generate plots for all 10 models
+#Again, remember to change index
+plots <- lapply(1:length(pca_models), function(i) plot_model_weights(sig_weights[[i]], i)) 
+
+
+print(plots[2])
+print(plots[6])
+print(plots[7])
+```
+
+
+```{r Portfolio returns plot}
+#Individual plots
+for (i in seq_along(dollar_returns)) {
+  print(plot(dollar_returns[[i]],
+             main = paste("Portfolio Value - Model", i),
+             ylab = "Dollar Value",
+             col = "blue", lwd = 2))
+}
+
+#Altogether
+combined_dollar_returns <- do.call(cbind, dollar_returns)
+colnames(combined_dollar_returns) <- paste0("Model_", 1:length(pca_models)) #Change index
+plot.xts(combined_dollar_returns,
+         main = "Portfolio Value Over Time",
+         legend.loc = "topleft",
+         col = 1:10,
+         lwd = 2)
+addEventLines(events = xts(x = '', order.by = as.Date('2021-09-16')), lty = 2, col = 'red', lwd = 3)
+addEventLines(events = xts(x = '', order.by = as.Date('2022-11-10')), lty = 2, col = 'red', lwd = 3)
+addEventLines(events = xts(x = '', order.by = as.Date('2023-12-13')), lty = 2, col = 'red', lwd = 3)
+
+# DCC models
+dcc_models <- do.call(cbind, dollar_returns[1:5])
+colnames(dcc_models) <- paste0("Model_", 1:5)
+
+# PCA models
+pca_models <- do.call(cbind, dollar_returns[6:10])
+colnames(pca_models) <- paste0("Model_", 6:10)
+
+plot.xts(dcc_models,
+         main = "Portfolio Value – Models 1 to 5",
+         legend.loc = "topleft",
+         col = 1:6,
+         lwd = 2)
+addEventLines(events = xts(x = '', order.by = as.Date('2021-09-16')), lty = 2, col = 'red', lwd = 3)
+addEventLines(events = xts(x = '', order.by = as.Date('2022-11-10')), lty = 2, col = 'red', lwd = 3)
+addEventLines(events = xts(x = '', order.by = as.Date('2023-12-13')), lty = 2, col = 'red', lwd = 3)
+
+plot.xts(pca_models,
+         main = "Portfolio Value – Models 6 to 10",
+         legend.loc = "topleft",
+         col = 1:4,
+         lwd = 2)
+addEventLines(events = xts(x = '', order.by = as.Date('2021-09-16')), lty = 2, col = 'red', lwd = 3)
+addEventLines(events = xts(x = '', order.by = as.Date('2022-11-10')), lty = 2, col = 'red', lwd = 3)
+addEventLines(events = xts(x = '', order.by = as.Date('2023-12-13')), lty = 2, col = 'red', lwd = 3)
+```
+
+```{r Performance evaluation}
+evaluation_metrics <- vector("list",4)
+names(evaluation_metrics) <- c("Mean","Variance","Skewness","Kurtosis")
+daily_mean_ret <- c()
+daily_var_ret <- c()
+daily_skew_ret <- c()
+daily_kur_ret <- c()
+for (j in 1:length(exp_portfolio_returns)){
+  daily_mean_ret[j] <- mean(exp_portfolio_returns[[j]])
+  daily_var_ret[j] <- var(exp_portfolio_returns[[j]])
+  daily_skew_ret[j] <- skewness(exp_portfolio_returns[[j]])
+  daily_kur_ret[j] <- kurtosis(exp_portfolio_returns[[j]])
+}
+evaluation_metrics[[1]] <- daily_mean_ret
+evaluation_metrics[[2]] <- daily_var_ret
+evaluation_metrics[[3]] <- daily_skew_ret
+evaluation_metrics[[4]] <- daily_kur_ret
+```
+
+```{r Ranks under each criteria}
+#This outputs the best performing models under each criteria, from best to worst.
+#e.g. Model 10 is the best under mean
+rank_mean <- sort(evaluation_metrics$Mean,decreasing=TRUE,index.return=TRUE)$ix
+rank_var <- sort(evaluation_metrics$Variance,index.return=TRUE)$ix
+rank_skew <- sort(evaluation_metrics$Skewness,decreasing=TRUE,index.return=TRUE)$ix
+rank_kur <- sort(evaluation_metrics$Kurtosis,index.return=TRUE)$ix
+
+rank_table <- data.frame(
+  Mean_Rank = rank_mean,
+  Variance_Rank = rank_var,
+  Skewness_Rank = rank_skew,
+  Kurtosis_Rank = rank_kur
+)
+print(rank_table)
+```
+
+```{r Rank table for different models}
+#This outputs the ranks for each model under different criterions
+
+rank_mean     <- rank(-evaluation_metrics$Mean)       # Higher is better
+rank_variance <- rank(evaluation_metrics$Variance)    # Lower is better
+rank_skew     <- rank(-evaluation_metrics$Skewness)   # Higher is better
+rank_kurtosis <- rank(evaluation_metrics$Kurtosis)    # Lower is better
+
+rank_table <- data.frame(
+  Model = paste0("Model ", 1:7),
+  Mean_Rank = rank_mean,
+  Variance_Rank = rank_variance,
+  Skewness_Rank = rank_skew,
+  Kurtosis_Rank = rank_kurtosis
+)
+
+# Print the rank table
+print(rank_table)
+```
+
